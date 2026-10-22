@@ -1,26 +1,22 @@
+
 import io
 import re
-from collections import Counter
 
 import fitz
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="EPF–ESIC ECR Highlighter", page_icon="🟨", layout="wide")
+st.set_page_config(
+    page_title="EPF–ESIC ECR Highlighter",
+    page_icon="🟨",
+    layout="wide",
+)
 
 st.title("🟨 EPF–ESIC ECR Highlighter")
-st.caption("Upload an ECR PDF and an Excel employee list. Matching employee rows are highlighted and exported as a new PDF.")
+st.caption(
+    "Upload ECR PDF and employee Excel/CSV to highlight matching employees."
+)
 
-with st.expander("How to use", expanded=True):
-    st.markdown("""
-1. Select **EPF** or **ESIC**.
-2. Upload the ECR PDF.
-3. Upload the Excel/CSV list containing employees to highlight.
-4. Select the matching column in Excel (prefer UAN for EPF and IP Number for ESIC, if present).
-5. Select the corresponding identifier found in the PDF, then click **Create highlighted PDF**.
-
-**Privacy:** Files are processed by this app session. Do not upload files you are not authorized to process. If deployed on a public host, use only an approved/private deployment for employee data.
-""")
 
 def norm(value):
     if value is None:
@@ -30,20 +26,28 @@ def norm(value):
         s = s[:-2]
     return re.sub(r"[^a-z0-9]", "", s)
 
+
 def read_list(uploaded):
-    name = uploaded.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded, dtype=str, keep_default_na=False).fillna("")
-    return pd.read_excel(uploaded, dtype=str, keep_default_na=False).fillna("")
+    uploaded.seek(0)
+    if uploaded.name.lower().endswith(".csv"):
+        return pd.read_csv(
+            uploaded, dtype=str, keep_default_na=False
+        ).fillna("")
+    return pd.read_excel(
+        uploaded, dtype=str, keep_default_na=False
+    ).fillna("")
+
 
 def line_groups(page):
-    words = page.get_text("words")
+    words = page.get_text("words", sort=True)
     grouped = {}
+
     for w in words:
-        key = (w[5], w[6])  # block_no, line_no
+        key = (w[5], w[6])
         grouped.setdefault(key, []).append(w)
+
     for group in grouped.values():
-        group.sort(key=lambda x: x[7])  # word_no
+        group.sort(key=lambda x: x[7])
         text = " ".join(w[4] for w in group)
         rect = fitz.Rect(
             min(w[0] for w in group),
@@ -53,161 +57,281 @@ def line_groups(page):
         )
         yield text, rect
 
-def choose_best_column(cols, hints):
+
+def find_column(columns, hints):
     for hint in hints:
-        for i, c in enumerate(cols):
-            if hint in str(c).lower():
-                return i
-    return 0
+        for col in columns:
+            if hint in str(col).strip().lower():
+                return col
+    return None
 
-def build_search_values(df, match_col, pdf_key_type, fallback_name_col=None):
-    cols = list(df.columns)
-    values = []
 
-    # Always include chosen match column unless a different PDF key mode is explicit
-    if pdf_key_type == "Same identifier as selected Excel column":
-        values = df[match_col].tolist()
+def get_keys(df, selected_col, search_type, name_col):
+    columns = list(df.columns)
+
+    if search_type == "Same identifier as selected Excel column":
+        source_col = selected_col
+
+    elif search_type == "Employee name":
+        source_col = name_col or find_column(
+            columns,
+            ["employee name", "emp name", "member name", "full name"],
+        )
+        source_col = source_col or selected_col
+
+    elif search_type == "UAN / Member ID":
+        source_col = find_column(
+            columns, ["uan", "member id", "memberid"]
+        )
+        source_col = source_col or selected_col
+
+    elif search_type == "ESIC IP Number":
+        source_col = find_column(
+            columns,
+            ["ip number", "ip no", "ipno", "insurance number"],
+        )
+        source_col = source_col or selected_col
+
     else:
-        # For alternate search types, prefer matching named columns
-        if pdf_key_type == "Employee name":
-            if fallback_name_col is not None and fallback_name_col in cols:
-                values = df[fallback_name_col].tolist()
-            else:
-                # fallback to a name-like column if present
-                name_candidates = ["employee name", "emp name", "name of employee", "member name", "full name"]
-                name_col = next((c for c in cols if any(h in str(c).lower() for h in name_candidates)), None)
-                if name_col is not None:
-                    values = df[name_col].tolist()
-                else:
-                    values = df[match_col].tolist()
+        source_col = find_column(
+            columns,
+            ["employee code", "emp code", "employeeid", "empid"],
+        )
+        source_col = source_col or selected_col
 
-        elif pdf_key_type == "UAN / Member ID":
-            candidates = ["uan", "member id", "memberid", "epf uan"]
-            chosen = next((c for c in cols if any(h in str(c).lower() for h in candidates)), None)
-            if chosen is not None:
-                values = df[chosen].tolist()
-            else:
-                values = df[match_col].tolist()
-
-        elif pdf_key_type == "ESIC IP Number":
-            candidates = ["ip number", "ipno", "insurance number", "esic ip"]
-            chosen = next((c for c in cols if any(h in str(c).lower() for h in candidates)), None)
-            if chosen is not None:
-                values = df[chosen].tolist()
-            else:
-                values = df[match_col].tolist()
-
-        elif pdf_key_type == "Employee Code":
-            candidates = ["employee code", "emp code", "code", "employeeid", "empid"]
-            chosen = next((c for c in cols if any(h in str(c).lower() for h in candidates)), None)
-            if chosen is not None:
-                values = df[chosen].tolist()
-            else:
-                values = df[match_col].tolist()
-
-        else:
-            values = df[match_col].tolist()
-
-    # Convert to normalized searchable values
     keys = set()
-    for v in values:
-        nv = norm(v)
-        if nv and len(nv) >= 3:
-            keys.add(nv)
-    return keys
+
+    for value in df[source_col].tolist():
+        key = norm(value)
+        if key and len(key) >= 3:
+            keys.add(key)
+
+    return keys, source_col
+
+
+def numeric_identifier(key):
+    return key.isdigit()
+
+
+def find_matches(line, keys, search_type):
+    normalized_line = norm(line)
+    matches = set()
+
+    for key in keys:
+        if numeric_identifier(key) and search_type in (
+            "UAN / Member ID",
+            "ESIC IP Number",
+        ):
+            # Match a complete number, allowing spaces or separators
+            # between digits in the PDF.
+            pattern = r"(?<!\d)" + r"[\s./-]*".join(
+                re.escape(ch) for ch in key
+            ) + r"(?!\d)"
+
+            if re.search(pattern, line):
+                matches.add(key)
+
+        elif key in normalized_line:
+            matches.add(key)
+
+    return matches
+
 
 with st.sidebar:
     st.header("Settings")
-    category = st.radio("ECR type", ["EPF", "ESIC"], horizontal=True)
-    st.info("EPF: UAN is usually the safest matching key. ESIC: IP Number is usually the safest matching key.")
+    category = st.radio("ECR type", ["EPF", "ESIC"])
+    st.info(
+        "EPF: use UAN / Member ID. ESIC: use IP Number "
+        "wherever available."
+    )
 
 pdf_file = st.file_uploader("1. Upload ECR PDF", type=["pdf"])
-excel_file = st.file_uploader("2. Upload employee list", type=["xlsx", "xls", "csv"])
+excel_file = st.file_uploader(
+    "2. Upload employee list", type=["xlsx", "xls", "csv"]
+)
 
 if excel_file is not None:
     try:
         df = read_list(excel_file)
+
         if df.empty or len(df.columns) == 0:
-            st.error("The employee list appears to be empty.")
+            st.error("The employee list is empty.")
             st.stop()
 
-        st.success(f"Employee list loaded: {len(df)} rows, {len(df.columns)} columns.")
+        st.success(
+            f"Excel loaded: {len(df)} rows, {len(df.columns)} columns."
+        )
         st.dataframe(df.head(8), use_container_width=True)
 
-        cols = list(df.columns)
+        columns = list(df.columns)
 
-        default_match_index = choose_best_column(cols, ["uan", "ip", "insurance", "employee id", "emp code", "member id", "name"])
-        match_col = st.selectbox("3. Which Excel column identifies employees to highlight?", cols, index=default_match_index)
-
-        name_candidates = ["employee name", "emp name", "member name", "full name", "name"]
-        fallback_name_col = next((c for c in cols if any(h in str(c).lower() for h in name_candidates)), None)
-
-        pdf_key_type = st.selectbox(
-            "4. What should the app search for in the PDF?",
-            ["Same identifier as selected Excel column", "Employee name", "UAN / Member ID", "ESIC IP Number", "Employee Code"]
+        default_col = find_column(
+            columns,
+            ["uan", "ip number", "insurance number", "member id",
+             "employee code", "emp code", "employee name", "name"],
         )
 
-        keys = build_search_values(df, match_col, pdf_key_type, fallback_name_col)
-        st.caption(f"Unique non-blank match values: {len(keys)}")
+        if default_col is None:
+            default_col = columns[0]
 
-    except Exception as e:
-        st.error(f"Could not read the employee list: {e}")
-        st.stop()
+        selected_col = st.selectbox(
+            "3. Select employee identifier column",
+            columns,
+            index=columns.index(default_col),
+        )
 
-    if pdf_file is not None:
-        if st.button("Create highlighted PDF", type="primary", use_container_width=True):
-            try:
-                pdf_bytes = pdf_file.getvalue()
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        name_col = find_column(
+            columns,
+            ["employee name", "emp name", "member name", "full name"],
+        )
+
+        search_type = st.selectbox(
+            "4. Identifier to search in PDF",
+            [
+                "Same identifier as selected Excel column",
+                "UAN / Member ID",
+                "ESIC IP Number",
+                "Employee Code",
+                "Employee name",
+            ],
+            index=(
+                1 if category == "EPF" else 2
+            ),
+        )
+
+        keys, actual_col = get_keys(
+            df, selected_col, search_type, name_col
+        )
+
+        st.caption(f"Excel column used: {actual_col}")
+        st.caption(f"Unique identifiers to search: {len(keys)}")
+
+        if not keys:
+            st.warning("No usable identifiers found in this column.")
+
+        if pdf_file is not None:
+            if st.button(
+                "Create highlighted PDF",
+                type="primary",
+                use_container_width=True,
+            ):
                 if not keys:
-                    st.error("No usable values found in the selected Excel column or selected PDF search field.")
+                    st.error("Please select a column containing identifiers.")
                     st.stop()
 
-                highlighted_lines = 0
-                matched_values = set()
-                pages_with_text = 0
+                try:
+                    doc = fitz.open(
+                        stream=pdf_file.getvalue(),
+                        filetype="pdf",
+                    )
 
-                for page in doc:
-                    page_lines = list(line_groups(page))
-                    if page_lines:
-                        pages_with_text += 1
+                    total_lines = 0
+                    highlighted_lines = 0
+                    pages_with_text = 0
+                    matched_values = set()
+                    pages_highlighted = set()
 
-                    for line_text, rect in page_lines:
-                        normalized_line = norm(line_text)
-                        found = [k for k in keys if k in normalized_line]
-                        if found:
-                            annot = page.add_highlight_annot(rect)
-                            annot.set_colors(stroke=(1, 0.85, 0.1))
-                            annot.update()
-                            highlighted_lines += 1
-                            matched_values.update(found)
+                    progress = st.progress(0)
 
-                if pages_with_text == 0:
-                    st.warning("No selectable text was found in this PDF. It may be scanned/image-only; OCR is needed before highlighting.")
+                    for page_number, page in enumerate(doc):
+                        page_lines = list(line_groups(page))
 
-                out = io.BytesIO()
-                doc.save(out, garbage=4, deflate=True)
-                doc.close()
+                        if page_lines:
+                            pages_with_text += 1
 
-                st.success(f"Finished. Highlighted {highlighted_lines} line(s); matched {len(matched_values)} unique identifier(s).")
-                st.download_button(
-                    "⬇️ Download highlighted PDF",
-                    data=out.getvalue(),
-                    file_name=f"{category.lower()}_ecr_highlighted.pdf",
-                    mime="application/pdf",
-                    type="primary",
-                    use_container_width=True,
-                )
+                        for line_text, rect in page_lines:
+                            total_lines += 1
 
-                unmatched = sorted(keys - matched_values)
-                with st.expander(f"Unmatched Excel values ({len(unmatched)})"):
-                    st.write("These values were not found in selectable PDF text. Check identifier type, spelling, or whether the PDF is scanned.")
-                    st.dataframe(pd.DataFrame({"Unmatched values": unmatched}), use_container_width=True)
+                            found = find_matches(
+                                line_text, keys, search_type
+                            )
 
-            except Exception as e:
-                st.error(f"Could not process the PDF: {e}")
+                            if found:
+                                annot = page.add_highlight_annot(rect)
+                                annot.set_colors(
+                                    stroke=(1, 0.85, 0.1)
+                                )
+                                annot.update()
+
+                                highlighted_lines += 1
+                                matched_values.update(found)
+                                pages_highlighted.add(page_number + 1)
+
+                        progress.progress(
+                            (page_number + 1) / max(len(doc), 1)
+                        )
+
+                    if pages_with_text == 0:
+                        doc.close()
+                        st.error(
+                            "No selectable PDF text found. "
+                            "This may be a scanned PDF; OCR is required."
+                        )
+                        st.stop()
+
+                    output = io.BytesIO()
+                    doc.save(output, garbage=4, deflate=True)
+                    doc.close()
+
+                    unmatched = sorted(keys - matched_values)
+
+                    st.success(
+                        f"Completed: {highlighted_lines} lines "
+                        f"highlighted across {len(pages_highlighted)} pages."
+                    )
+
+                    st.metric("Excel identifiers", len(keys))
+                    st.metric("Identifiers matched", len(matched_values))
+                    st.metric("Identifiers not found", len(unmatched))
+
+                    st.download_button(
+                        "⬇️ Download highlighted PDF",
+                        data=output.getvalue(),
+                        file_name=f"{category.lower()}_ecr_highlighted.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                    if highlighted_lines == 0:
+                        st.warning(
+                            "No matches found. Check the selected "
+                            "Excel column and PDF identifier type."
+                        )
+
+                    with st.expander(
+                        f"Unmatched Excel identifiers ({len(unmatched)})"
+                    ):
+                        st.dataframe(
+                            pd.DataFrame({"Unmatched identifiers": unmatched}),
+                            use_container_width=True,
+                        )
+
+                    with st.expander("Matching summary"):
+                        st.write(
+                            f"PDF pages containing selectable text: "
+                            f"{pages_with_text}"
+                        )
+                        st.write(f"PDF lines checked: {total_lines}")
+                        st.write(
+                            "Pages highlighted: "
+                            + (
+                                ", ".join(map(str, sorted(pages_highlighted)))
+                                if pages_highlighted else "None"
+                            )
+                        )
+
+                except Exception as e:
+                    st.error(f"Could not process PDF: {e}")
+
+    except Exception as e:
+        st.error(f"Could not read employee list: {e}")
+
 else:
-    st.info("Upload an employee Excel/CSV list to configure matching options.")
+    st.info("Upload an employee Excel/CSV list to start.")
 
 st.divider()
-st.caption("Important: This tool highlights matching text lines; it does not validate EPF/ESIC calculations or file correctness. Always review the generated PDF before sharing.")
+st.caption(
+    "This tool matches identifiers in selectable PDF text. "
+    "Scanned PDFs may require OCR. Review the output before use."
+)
