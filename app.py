@@ -1,24 +1,32 @@
 if found:
+    line_highlighted = False
+
+    # PDF line ke words aur unki positions nikalein
+    words = page.get_text("words")
+
+    line_words = [
+        w for w in words
+        if w[5] == block_no and w[6] == line_no
+    ]
+
     for key in found:
-        search_pattern = (
-            r"(?<!\d)" +
-            r"[\s./-]*".join(re.escape(ch) for ch in key) +
-            r"(?!\d)"
-        )
+        key_norm = norm(key)
 
-        for match in re.finditer(search_pattern, line_text):
-            matched_text = match.group(0).strip()
+        if not key_norm:
+            continue
 
-            if not matched_text:
-                continue
+        # Pehle individual words mein exact number dhoondhein
+        for word in line_words:
+            word_text = word[4]
+            word_norm = norm(word_text)
 
-            # Find the exact identifier in the PDF line
-            rects = page.search_for(matched_text)
-
-            for identifier_rect in rects:
-                annot = page.add_highlight_annot(identifier_rect)
+            if word_norm == key_norm:
+                rect = fitz.Rect(word[0], word[1], word[2], word[3])
+                annot = page.add_highlight_annot(rect)
                 annot.set_colors(stroke=(1, 0.85, 0.1))
                 annot.update()
+                line_highlighted = True
 
-    highlighted_lines += 1
-    matched_values.update(found)
+    if line_highlighted:
+        highlighted_lines += 1
+        matched_values.update(found)
